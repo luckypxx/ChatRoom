@@ -14,27 +14,51 @@ import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+
 public class MultiThreadServer {
+    private static Map<String, Socket> clientInfos = new ConcurrentHashMap<>();
 
-    private static Map<String,Socket> clientMap =
-            new ConcurrentHashMap<>();
-
-    //采用内部类来实现服务器与客户端的实际交互
-    private static class ExecuteRealClient implements Runnable{
+    private static class ExecuteClientRequest implements Runnable {
         private Socket client;
 
-        public ExecuteRealClient(Socket client) {
+        public ExecuteClientRequest(Socket client) {
             this.client = client;
         }
 
-        public void toAllMessage(String message){
+        @Override
+        public void run() {
             try {
-                PrintStream out = new PrintStream(client.getOutputStream());
-                int num = clientMap.size();
-                for(int i = 0;i < num;++i){
-                    for(Socket tmpClient : clientMap.values()){
-                        if(!(tmpClient.equals(client))){
-                            out.println(message);
+                Scanner in = new Scanner(client.getInputStream());
+                while (true) {
+                    String strFromClient = "";
+                    if (in.hasNext()) {
+                        strFromClient = in.nextLine();
+                        Pattern pattern = Pattern.compile("\r");
+                        Matcher matcher = pattern.matcher(strFromClient);
+                        strFromClient = matcher.replaceAll("");
+                        // 注册流程
+                        // userName:
+                        if (strFromClient.startsWith("userName")) {
+                            String userName = strFromClient.split("\\:")[1];
+                            registerUser(userName,client);
+                        }
+                        // 群聊流程
+                        // G:hello
+                        if (strFromClient.startsWith("G:")) {
+                            String groupMsg = strFromClient.split("\\:")[1];
+                            groupChat(groupMsg);
+                        }
+                        // 私聊流程
+                        // P:name msg
+                        if (strFromClient.startsWith("P:")) {
+                            String userName = strFromClient.split("\\:")[1].split("\\-")[0];
+                            String privateMsg = strFromClient.split("\\:")[1].split("\\-")[1];
+                            privateChat(userName,privateMsg);
+                        }
+                        // 退出
+                        if (strFromClient.contains("byebye")) {
+                            String userName = strFromClient.split("\\:")[0];
+                            userOffLine(userName);
                         }
                     }
                 }
@@ -42,72 +66,69 @@ public class MultiThreadServer {
                 e.printStackTrace();
             }
         }
-
-        @Override
-        public void run() {
-
+        // 注册流程
+        private void registerUser(String userName,Socket socket) {
+            clientInfos.put(userName,socket);
+            System.out.println("用户"+userName+"注册成功!");
+            int clientNumber = clientInfos.size();
+            System.out.println("当前聊天室共"+clientNumber+"人");
             try {
-                Scanner in = new Scanner(client.getInputStream());
-                String str = null;
-                while(true){
-
-                    if(in.hasNextLine()){
-                        str = in.nextLine();
-                        //识别windows下的换行符，将\r替换为""
-                        Pattern pattern = Pattern.compile("\r");
-                        Matcher matcher = pattern.matcher(str);
-                        matcher.replaceAll("");
-                    }
-                    //注册
-                    if(str.startsWith("userName")){
-                        String userName = str.split("\\:")[1];
-                        clientMap.put(userName,client);
-                        System.out.println(userName + "上线啦！");
-                        System.out.println("当前共有" + clientMap.size() + "人在线");
-                    }
-
-                    //群聊:G
-                    if(str.startsWith("G")){
-                        String message = str.split("\\:")[1];
-                        System.out.println(message);
-                        toAllMessage(message);
-                    }
-
-                    //私聊:P
-
-                    //用户退出:bye
-
-                }
-
+                PrintStream out = new PrintStream(socket.getOutputStream(),true,"UTF-8");
+                out.println("注册成功!");
+                out.println("当前聊天室共"+clientNumber+"人");
+                groupChat("用户"+userName+"已上线!");
             } catch (IOException e) {
                 e.printStackTrace();
             }
-
+        }
+        // 群聊流程
+        private void groupChat(String groupMsg) {
+            // 取出当前所有用户的Socket信息，将消息遍历发送
+            Set<Map.Entry<String,Socket>> clientEntry = clientInfos.entrySet();
+            Iterator<Map.Entry<String,Socket>> iterator = clientEntry.iterator();
+            while (iterator.hasNext()) {
+                // 取出Socket
+                Socket client = iterator.next().getValue();
+                try {
+                    PrintStream out = new PrintStream(client.getOutputStream(),true,"UTF-8");
+                    out.println("群聊信息为:"+groupMsg);
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+        // 私聊流程
+        private void privateChat(String userName,String privateMsg) {
+            // 取出userName对应的Socket信息
+            Socket client = clientInfos.get(userName);
+            try {
+                PrintStream out = new PrintStream(client.getOutputStream(),true,"UTF-8");
+                out.println("私聊信息为:"+privateMsg);
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }
+        // 用户退出流程
+        private void userOffLine(String userName) {
+            clientInfos.remove(userName);
+            System.out.println(userName+"已下线!");
+            System.out.println("当前聊天室共"+clientInfos.size()+"人");
+            groupChat(userName+"已下线!");
         }
     }
 
-    public static void main(String[] args) {
-
-        //创建有20个线程的线程池
+    public static void main(String[] args) throws Exception{
+        ServerSocket serverSocket = new ServerSocket(6666);
         ExecutorService executorService = Executors.newFixedThreadPool(20);
-
-        //建立基站
-        try {
-            ServerSocket server = new ServerSocket(6666);
-            for(int i = 0;i < 20;i++){
-                System.out.println("等待客户端连接");
-                Socket client = server.accept();
-                System.out.println("有新的客户端连接，端口号为" + client.getPort());
-                //每当用户连接，新建线程进行处理
-                executorService.submit(new ExecuteRealClient(client));
-
-            }
-
-            executorService.shutdown();
-            server.close();
-        } catch (IOException e) {
-            e.printStackTrace();
+        System.out.println("等待用户连接");
+        for (int i = 0;i < 20;i++) {
+            Socket client = serverSocket.accept();
+            System.out.println("有新用户连接!端口号为:"+client.getPort());
+            ExecuteClientRequest executeClientRequest = new ExecuteClientRequest(client);
+            executorService.submit(executeClientRequest);
         }
-
+        executorService.shutdown();
+        serverSocket.close();
     }
 }
+
